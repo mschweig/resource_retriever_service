@@ -10,6 +10,7 @@ find_package(ament_cmake_ros REQUIRED)
 find_package(resource_retriever REQUIRED)
 find_package(resource_retriever_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcpputils REQUIRED)
 
 add_library(${PROJECT_NAME}
   src/resource_retriever_service_plugin.cpp
@@ -23,6 +24,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 
 target_link_libraries(${PROJECT_NAME} PUBLIC
   rclcpp::rclcpp
+  rcpputils::rcpputils
   resource_retriever::resource_retriever
   ${resource_retriever_interfaces_TARGETS}
 )
@@ -32,6 +34,7 @@ ament_export_targets(${PROJECT_NAME} HAS_LIBRARY_TARGET)
 
 ament_export_dependencies(
   rclcpp
+  rcpputils
   resource_retriever
   resource_retriever_interfaces
 )

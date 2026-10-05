@@ -17,6 +17,8 @@
 #include <chrono>
 #include <cinttypes>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,6 +39,7 @@
 #include <rclcpp/node_interfaces/node_logging_interface.hpp>
 #include <rclcpp/node_interfaces/node_services_interface.hpp>
 #include <rclcpp/qos.hpp>
+#include <rcpputils/env.hpp>
 #include <resource_retriever/plugins/retriever_plugin.hpp>
 #include <resource_retriever/resource.hpp>
 #include <resource_retriever_interfaces/srv/get_resource.hpp>
@@ -153,7 +156,23 @@ RosServiceResourceRetriever::get_shared(const std::string & url)
   auto result = client->async_send_request(req);
 
   using namespace std::chrono_literals;
-  auto maximum_wait_time = 3s;
+  std::chrono::milliseconds maximum_wait_time = 30s;
+  const std::string timeout_env = rcpputils::get_env_var(service_timeout_env_var.data());
+  if (!timeout_env.empty()) {
+    char * end = nullptr;
+    const int64_t timeout_ms = std::strtoll(timeout_env.c_str(), &end, 10);
+    if (end != timeout_env.c_str() && *end == '\0' && timeout_ms > 0) {
+      maximum_wait_time = std::chrono::milliseconds(timeout_ms);
+    } else {
+      RCLCPP_WARN(
+        this->logger_,
+        "Invalid %s value '%s' (expected positive integer milliseconds), using default %" PRId64
+        " ms.",
+        service_timeout_env_var.data(),
+        timeout_env.c_str(),
+        static_cast<int64_t>(maximum_wait_time.count()));
+    }
+  }
 
   if (executor_.spin_until_future_complete(result, maximum_wait_time) !=
     rclcpp::FutureReturnCode::SUCCESS)

@@ -19,6 +19,7 @@
   <depend>resource_retriever</depend>
   <depend>resource_retriever_interfaces</depend>
   <depend>rclcpp</depend>
+  <depend>rcpputils</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_gmock</test_depend>

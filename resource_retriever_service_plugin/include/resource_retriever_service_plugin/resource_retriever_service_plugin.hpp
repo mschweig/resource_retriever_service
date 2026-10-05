@@ -50,6 +50,9 @@ class RESOURCE_RETRIEVER_SERVICE_PLUGIN_PUBLIC RosServiceResourceRetriever : pub
   RosServiceResourceRetriever() = delete;
 
 public:
+  static constexpr std::string_view service_timeout_env_var =
+    "RESOURCE_RETRIEVER_SERVICE_TIMEOUT_MS";
+
   using NodeType = rclcpp::node_interfaces::NodeInterfaces<
     rclcpp::node_interfaces::NodeBaseInterface,
     rclcpp::node_interfaces::NodeGraphInterface,

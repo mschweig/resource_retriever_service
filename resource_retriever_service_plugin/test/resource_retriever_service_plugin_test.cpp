@@ -14,6 +14,7 @@
 
 #include "resource_retriever_service_plugin/resource_retriever_service_plugin.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -24,6 +25,7 @@
 #include <rclcpp/node.hpp>
 #include <rclcpp/service.hpp>
 #include <rclcpp/utilities.hpp>
+#include <rcpputils/env.hpp>
 #include <resource_retriever/resource.hpp>
 #include <resource_retriever_interfaces/srv/get_resource.hpp>
 
@@ -112,6 +114,8 @@ protected:
 
   void TearDown() override
   {
+    rcpputils::set_env_var(RosServiceResourceRetriever::service_timeout_env_var.data(), nullptr);
+
     executor_->cancel();
     executor_thread_->join();
 
@@ -271,6 +275,44 @@ TEST_F(RosServiceResourceRetrieverTest, MultipleServices)
   auto resource2 = retriever_->get_shared("service://test_service2:a");
   ASSERT_NE(nullptr, resource2);
   EXPECT_EQ(resource2->data, resource_data2);
+}
+
+TEST_F(RosServiceResourceRetrieverTest, ServiceTimeoutViaEnvVarReturnsNull)
+{
+  ASSERT_TRUE(
+    rcpputils::set_env_var(RosServiceResourceRetriever::service_timeout_env_var.data(), "50"));
+
+  GetResource::Response response;
+  response.status_code = GetResource::Response::OK;
+  response.body = std::vector<uint8_t>(2u, 3);
+
+  EXPECT_CALL(mock_service_function_, Call(_, _)).WillOnce(
+    Invoke(
+      [response](const std::string &, const std::string &) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        return response;
+      }));
+
+  auto resource = retriever_->get_shared("service://test_service:a");
+  EXPECT_EQ(resource, nullptr);
+}
+
+TEST_F(RosServiceResourceRetrieverTest, InvalidServiceTimeoutEnvVarFallsBackToDefault)
+{
+  ASSERT_TRUE(
+    rcpputils::set_env_var(
+      RosServiceResourceRetriever::service_timeout_env_var.data(), "invalid_timeout"));
+
+  std::vector<uint8_t> resource_data(2u, 3);
+  GetResource::Response response;
+  response.status_code = GetResource::Response::OK;
+  response.body = resource_data;
+
+  EXPECT_CALL(mock_service_function_, Call(_, _)).WillOnce(Return(response));
+
+  auto resource = retriever_->get_shared("service://test_service:a");
+  ASSERT_NE(nullptr, resource);
+  EXPECT_EQ(resource->data, resource_data);
 }
 
 }  // namespace
