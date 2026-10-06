@@ -14,7 +14,6 @@
 
 #include "resource_retriever_service_plugin/resource_retriever_service_plugin.hpp"
 
-#include <charconv>
 #include <chrono>
 #include <cinttypes>
 #include <cstddef>
@@ -23,13 +22,16 @@
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/callback_group.hpp>
 #include <rclcpp/client.hpp>
 #include <rclcpp/create_client.hpp>
+#include <rclcpp/exceptions/exceptions.hpp>
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rclcpp/future_return_code.hpp>
 #include <rclcpp/logger.hpp>
@@ -38,9 +40,11 @@
 #include <rclcpp/node_interfaces/node_graph_interface.hpp>
 #include <rclcpp/node_interfaces/node_interfaces.hpp>
 #include <rclcpp/node_interfaces/node_logging_interface.hpp>
+#include <rclcpp/node_interfaces/node_parameters_interface.hpp>
 #include <rclcpp/node_interfaces/node_services_interface.hpp>
+#include <rclcpp/parameter.hpp>
+#include <rclcpp/parameter_value.hpp>
 #include <rclcpp/qos.hpp>
-#include <rcpputils/env.hpp>
 #include <resource_retriever/plugins/retriever_plugin.hpp>
 #include <resource_retriever/resource.hpp>
 #include <resource_retriever_interfaces/srv/get_resource.hpp>
@@ -67,26 +71,88 @@ RosServiceResourceRetriever::RosServiceResourceRetriever(
     callback_group_,
     ros_node_.get<rclcpp::node_interfaces::NodeBaseInterface>());
 
-  const std::string timeout_env = rcpputils::get_env_var(service_timeout_env_var.data());
-  if (!timeout_env.empty()) {
-    constexpr int64_t max_timeout_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::nanoseconds::max()).count();
-    int64_t timeout_ms = 0;
-    const char * begin = timeout_env.data();
-    const char * end = begin + timeout_env.size();
-    const auto [ptr, ec] = std::from_chars(begin, end, timeout_ms);
-    if (ec == std::errc{} && ptr == end && timeout_ms > 0 && timeout_ms <= max_timeout_ms) {
-      maximum_wait_time_ = std::chrono::milliseconds(timeout_ms);
-    } else {
+  auto params_interface =
+    ros_node_.get<rclcpp::node_interfaces::NodeParametersInterface>();
+
+  constexpr int64_t max_timeout_ms =
+    std::chrono::duration_cast<std::chrono::milliseconds>(
+    std::chrono::nanoseconds::max()).count();
+
+  on_set_parameters_callback_handle_ =
+    params_interface->add_on_set_parameters_callback(
+    [this](const std::vector<rclcpp::Parameter> & parameters) {
+      rcl_interfaces::msg::SetParametersResult result;
+      result.successful = true;
+      for (const auto & param : parameters) {
+        if (param.get_name() == service_timeout_param_name) {
+          if (param.get_type() != rclcpp::ParameterType::PARAMETER_INTEGER) {
+            result.successful = false;
+            result.reason = "Expected integer milliseconds.";
+            return result;
+          }
+          const int64_t timeout_ms = param.as_int();
+          if (timeout_ms <= 0 || timeout_ms > max_timeout_ms) {
+            result.successful = false;
+            result.reason = "Timeout must be in range [1, " +
+            std::to_string(max_timeout_ms) + "] ms.";
+            return result;
+          }
+          maximum_wait_time_ms_.store(timeout_ms);
+        }
+      }
+      return result;
+    });
+
+  const std::string param_name(service_timeout_param_name);
+  if (!params_interface->has_parameter(param_name)) {
+    rcl_interfaces::msg::ParameterDescriptor descriptor;
+    descriptor.description =
+      "Maximum wait time in milliseconds for resource retriever service calls.";
+    try {
+      params_interface->declare_parameter(
+        param_name,
+        rclcpp::ParameterValue(static_cast<int64_t>(default_service_timeout.count())),
+        descriptor);
+    } catch (const rclcpp::exceptions::InvalidParameterValueException & ex) {
       RCLCPP_WARN(
         this->logger_,
-        "Invalid %s value '%s' (expected positive integer milliseconds <= %" PRId64
-        "), using default %" PRId64 " ms.",
-        service_timeout_env_var.data(),
-        timeout_env.c_str(),
-        max_timeout_ms,
-        static_cast<int64_t>(maximum_wait_time_.count()));
+        "Invalid initial value for parameter '%s' (%s), using default %" PRId64 " ms.",
+        param_name.c_str(),
+        ex.what(),
+        static_cast<int64_t>(default_service_timeout.count()));
+      params_interface->declare_parameter(
+        param_name,
+        rclcpp::ParameterValue(static_cast<int64_t>(default_service_timeout.count())),
+        descriptor,
+        true);
+    } catch (const rclcpp::exceptions::InvalidParameterTypeException & ex) {
+      RCLCPP_WARN(
+        this->logger_,
+        "Invalid type for parameter '%s' (%s), using default %" PRId64 " ms.",
+        param_name.c_str(),
+        ex.what(),
+        static_cast<int64_t>(default_service_timeout.count()));
+      params_interface->declare_parameter(
+        param_name,
+        rclcpp::ParameterValue(static_cast<int64_t>(default_service_timeout.count())),
+        descriptor,
+        true);
+    }
+  } else {
+    rclcpp::Parameter timeout_param;
+    if (params_interface->get_parameter(param_name, timeout_param)) {
+      if (timeout_param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
+        timeout_param.as_int() > 0 && timeout_param.as_int() <= max_timeout_ms)
+      {
+        maximum_wait_time_ms_.store(timeout_param.as_int());
+      } else {
+        RCLCPP_WARN(
+          this->logger_,
+          "Invalid '%s' parameter value '%s', using default %" PRId64 " ms.",
+          param_name.c_str(),
+          timeout_param.value_to_string().c_str(),
+          static_cast<int64_t>(default_service_timeout.count()));
+      }
     }
   }
 }
@@ -179,7 +245,8 @@ RosServiceResourceRetriever::get_shared(const std::string & url)
   req->etag = etag;
   auto result = client->async_send_request(req);
 
-  if (executor_.spin_until_future_complete(result, maximum_wait_time_) !=
+  const std::chrono::milliseconds maximum_wait_time(maximum_wait_time_ms_.load());
+  if (executor_.spin_until_future_complete(result, maximum_wait_time) !=
     rclcpp::FutureReturnCode::SUCCESS)
   {
     RCLCPP_ERROR(this->logger_, "Timeout: Not able to call the service %s", service_name.data());

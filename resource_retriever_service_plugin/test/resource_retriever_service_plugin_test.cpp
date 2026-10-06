@@ -24,9 +24,11 @@
 
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rclcpp/node.hpp>
+#include <rclcpp/node_options.hpp>
+#include <rclcpp/parameter.hpp>
+#include <rclcpp/parameter_value.hpp>
 #include <rclcpp/service.hpp>
 #include <rclcpp/utilities.hpp>
-#include <rcpputils/env.hpp>
 #include <resource_retriever/resource.hpp>
 #include <resource_retriever_interfaces/srv/get_resource.hpp>
 
@@ -92,8 +94,6 @@ class RosServiceResourceRetrieverTest : public ::testing::Test
 protected:
   void SetUp() override
   {
-    rcpputils::set_env_var(RosServiceResourceRetriever::service_timeout_env_var.data(), nullptr);
-
     executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
 
     client_node_ = rclcpp::Node::make_shared("test_client_node");
@@ -117,8 +117,6 @@ protected:
 
   void TearDown() override
   {
-    rcpputils::set_env_var(RosServiceResourceRetriever::service_timeout_env_var.data(), nullptr);
-
     executor_->cancel();
     executor_thread_->join();
 
@@ -280,11 +278,13 @@ TEST_F(RosServiceResourceRetrieverTest, MultipleServices)
   EXPECT_EQ(resource2->data, resource_data2);
 }
 
-TEST_F(RosServiceResourceRetrieverTest, ServiceTimeoutViaEnvVarReturnsNull)
+TEST_F(RosServiceResourceRetrieverTest, ServiceTimeoutViaParameterOverrideReturnsNull)
 {
-  ASSERT_TRUE(
-    rcpputils::set_env_var(RosServiceResourceRetriever::service_timeout_env_var.data(), "50"));
-  retriever_ = std::make_unique<RosServiceResourceRetriever>(*client_node_);
+  rclcpp::NodeOptions options;
+  options.append_parameter_override(
+    std::string(RosServiceResourceRetriever::service_timeout_param_name), 50);
+  auto custom_node = rclcpp::Node::make_shared("test_override_client_node", options);
+  RosServiceResourceRetriever custom_retriever(*custom_node);
 
   GetResource::Response response;
   response.status_code = GetResource::Response::OK;
@@ -297,20 +297,35 @@ TEST_F(RosServiceResourceRetrieverTest, ServiceTimeoutViaEnvVarReturnsNull)
         return response;
       }));
 
-  auto resource = retriever_->get_shared("service://test_service:a");
+  auto resource = custom_retriever.get_shared("service://test_service:a");
   EXPECT_EQ(resource, nullptr);
 }
 
-TEST_F(RosServiceResourceRetrieverTest, ValidServiceTimeoutEnvVarSucceeds)
+TEST_F(RosServiceResourceRetrieverTest, RuntimeServiceTimeoutParameterUpdate)
 {
-  ASSERT_TRUE(
-    rcpputils::set_env_var(RosServiceResourceRetriever::service_timeout_env_var.data(), "1000"));
-  retriever_ = std::make_unique<RosServiceResourceRetriever>(*client_node_);
+  const std::string param_name(RosServiceResourceRetriever::service_timeout_param_name);
+
+  // Set runtime timeout to 50ms -> 200ms service call should time out.
+  auto set_result = client_node_->set_parameter(rclcpp::Parameter(param_name, 50));
+  ASSERT_TRUE(set_result.successful);
 
   std::vector<uint8_t> resource_data(2u, 3);
   GetResource::Response response;
   response.status_code = GetResource::Response::OK;
   response.body = resource_data;
+
+  EXPECT_CALL(mock_service_function_, Call(_, _)).WillOnce(
+    Invoke(
+      [response](const std::string &, const std::string &) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        return response;
+      }));
+
+  EXPECT_EQ(nullptr, retriever_->get_shared("service://test_service:a"));
+
+  // Update runtime timeout to 1000ms -> 100ms service call should now succeed.
+  set_result = client_node_->set_parameter(rclcpp::Parameter(param_name, 1000));
+  ASSERT_TRUE(set_result.successful);
 
   EXPECT_CALL(mock_service_function_, Call(_, _)).WillOnce(
     Invoke(
@@ -324,15 +339,32 @@ TEST_F(RosServiceResourceRetrieverTest, ValidServiceTimeoutEnvVarSucceeds)
   EXPECT_EQ(resource->data, resource_data);
 }
 
-TEST_F(RosServiceResourceRetrieverTest, InvalidServiceTimeoutEnvVarFallsBackToDefault)
+TEST_F(RosServiceResourceRetrieverTest, InvalidRuntimeServiceTimeoutParameterRejected)
 {
-  const std::vector<std::string> invalid_values = {
-    "invalid_timeout",
-    "0",
-    "-50",
-    "10abc",
-    "999999999999999999999999999999",
-    std::to_string(std::numeric_limits<int64_t>::max()),
+  const std::string param_name(RosServiceResourceRetriever::service_timeout_param_name);
+
+  ASSERT_TRUE(client_node_->set_parameter(rclcpp::Parameter(param_name, 500)).successful);
+
+  EXPECT_FALSE(client_node_->set_parameter(rclcpp::Parameter(param_name, 0)).successful);
+  EXPECT_FALSE(client_node_->set_parameter(rclcpp::Parameter(param_name, -50)).successful);
+  EXPECT_FALSE(
+    client_node_->set_parameter(
+      rclcpp::Parameter(param_name, std::numeric_limits<int64_t>::max())).successful);
+  EXPECT_FALSE(
+    client_node_->set_parameter(rclcpp::Parameter(param_name, "invalid_timeout")).successful);
+
+  // Previous valid timeout (500ms) remains intact.
+  EXPECT_EQ(500, client_node_->get_parameter(param_name).as_int());
+}
+
+TEST_F(RosServiceResourceRetrieverTest, InvalidInitialServiceTimeoutParameterFallsBackToDefault)
+{
+  const std::string param_name(RosServiceResourceRetriever::service_timeout_param_name);
+  const std::vector<rclcpp::ParameterValue> invalid_overrides = {
+    rclcpp::ParameterValue(0),
+    rclcpp::ParameterValue(-50),
+    rclcpp::ParameterValue(std::numeric_limits<int64_t>::max()),
+    rclcpp::ParameterValue(std::string("invalid_timeout")),
   };
 
   std::vector<uint8_t> resource_data(2u, 3);
@@ -340,16 +372,17 @@ TEST_F(RosServiceResourceRetrieverTest, InvalidServiceTimeoutEnvVarFallsBackToDe
   response.status_code = GetResource::Response::OK;
   response.body = resource_data;
 
-  for (const auto & invalid_value : invalid_values) {
-    SCOPED_TRACE("Testing invalid env var value: " + invalid_value);
-    ASSERT_TRUE(
-      rcpputils::set_env_var(
-        RosServiceResourceRetriever::service_timeout_env_var.data(), invalid_value.c_str()));
-    retriever_ = std::make_unique<RosServiceResourceRetriever>(*client_node_);
+  for (size_t i = 0; i < invalid_overrides.size(); ++i) {
+    rclcpp::NodeOptions options;
+    options.append_parameter_override(param_name, invalid_overrides[i]);
+    auto custom_node = rclcpp::Node::make_shared(
+      "test_invalid_override_node_" + std::to_string(i), options);
+    RosServiceResourceRetriever custom_retriever(*custom_node);
 
-    // Sleep 100ms in the service callback so that if a short prefix like "10abc" (10ms),
-    // "0", "-50", or an overflowed negative duration were used instead of falling back
-    // to the 3000ms default, the call would time out and fail.
+    EXPECT_EQ(
+      RosServiceResourceRetriever::default_service_timeout.count(),
+      custom_node->get_parameter(param_name).as_int());
+
     EXPECT_CALL(mock_service_function_, Call(_, _)).WillOnce(
       Invoke(
         [response](const std::string &, const std::string &) {
@@ -357,7 +390,7 @@ TEST_F(RosServiceResourceRetrieverTest, InvalidServiceTimeoutEnvVarFallsBackToDe
           return response;
         }));
 
-    auto resource = retriever_->get_shared("service://test_service:a");
+    auto resource = custom_retriever.get_shared("service://test_service:a");
     ASSERT_NE(nullptr, resource);
     EXPECT_EQ(resource->data, resource_data);
   }

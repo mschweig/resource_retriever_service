@@ -17,7 +17,9 @@
 
 #include <resource_retriever_service_plugin/visibility_control.h>
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -32,6 +34,7 @@
 #include <rclcpp/node_interfaces/node_graph_interface.hpp>
 #include <rclcpp/node_interfaces/node_interfaces.hpp>
 #include <rclcpp/node_interfaces/node_logging_interface.hpp>
+#include <rclcpp/node_interfaces/node_parameters_interface.hpp>
 #include <rclcpp/node_interfaces/node_services_interface.hpp>
 #include <resource_retriever/plugins/retriever_plugin.hpp>
 #include <resource_retriever/resource.hpp>
@@ -51,14 +54,15 @@ class RESOURCE_RETRIEVER_SERVICE_PLUGIN_PUBLIC RosServiceResourceRetriever : pub
   RosServiceResourceRetriever() = delete;
 
 public:
-  static constexpr std::string_view service_timeout_env_var =
-    "RESOURCE_RETRIEVER_SERVICE_TIMEOUT_MS";
+  static constexpr std::string_view service_timeout_param_name =
+    "resource_retriever_service_timeout_ms";
   static constexpr std::chrono::milliseconds default_service_timeout{3000};
 
   using NodeType = rclcpp::node_interfaces::NodeInterfaces<
     rclcpp::node_interfaces::NodeBaseInterface,
     rclcpp::node_interfaces::NodeGraphInterface,
     rclcpp::node_interfaces::NodeLoggingInterface,
+    rclcpp::node_interfaces::NodeParametersInterface,
     rclcpp::node_interfaces::NodeServicesInterface>;
 
   explicit RosServiceResourceRetriever(NodeType ros_node);
@@ -91,7 +95,9 @@ private:
 
   rclcpp::executors::SingleThreadedExecutor executor_;
   rclcpp::Logger logger_;
-  std::chrono::milliseconds maximum_wait_time_{default_service_timeout};
+  std::atomic<int64_t> maximum_wait_time_ms_{default_service_timeout.count()};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+    on_set_parameters_callback_handle_;
 
   // Maps [service name][resource path] => pair(etag, resource).
   std::unordered_map<
