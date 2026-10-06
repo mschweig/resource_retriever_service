@@ -17,9 +17,7 @@
 
 #include <resource_retriever_service_plugin/visibility_control.h>
 
-#include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -54,9 +52,17 @@ class RESOURCE_RETRIEVER_SERVICE_PLUGIN_PUBLIC RosServiceResourceRetriever : pub
   RosServiceResourceRetriever() = delete;
 
 public:
+  /// Name of the integer parameter, in milliseconds, that limits how long a service call may take.
+  /**
+   * The parameter is declared on the node given to the constructor, unless it already exists.
+   * It is shared by all the retrievers created with that node and can be changed at runtime.
+   */
   static constexpr std::string_view service_timeout_param_name =
     "resource_retriever_service_timeout_ms";
+  /// Value of the service timeout parameter when it is not overridden.
   static constexpr std::chrono::milliseconds default_service_timeout{3000};
+  /// Largest value accepted for the service timeout parameter.
+  static constexpr std::chrono::milliseconds max_service_timeout{std::chrono::hours{24}};
 
   using NodeType = rclcpp::node_interfaces::NodeInterfaces<
     rclcpp::node_interfaces::NodeBaseInterface,
@@ -78,6 +84,9 @@ public:
 private:
   rclcpp::Client<GetResource>::SharedPtr getServiceClient(const std::string & service_name);
 
+  // Returns the current value of the service timeout parameter.
+  std::chrono::milliseconds getServiceTimeout();
+
   // It should be safe to keep a reference to the node interfaces here, because this
   // plugin will be destroyed with the resource retriever it is used with,
   // which should be destroyed along before the node abstraction is destroyed.
@@ -95,9 +104,6 @@ private:
 
   rclcpp::executors::SingleThreadedExecutor executor_;
   rclcpp::Logger logger_;
-  std::atomic<int64_t> maximum_wait_time_ms_{default_service_timeout.count()};
-  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
-    on_set_parameters_callback_handle_;
 
   // Maps [service name][resource path] => pair(etag, resource).
   std::unordered_map<
