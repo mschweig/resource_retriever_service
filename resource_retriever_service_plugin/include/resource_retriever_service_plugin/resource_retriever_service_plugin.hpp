@@ -17,6 +17,7 @@
 
 #include <resource_retriever_service_plugin/visibility_control.h>
 
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -52,6 +53,7 @@ class RESOURCE_RETRIEVER_SERVICE_PLUGIN_PUBLIC RosServiceResourceRetriever : pub
 public:
   static constexpr std::string_view service_timeout_env_var =
     "RESOURCE_RETRIEVER_SERVICE_TIMEOUT_MS";
+  static constexpr std::chrono::milliseconds default_service_timeout{3000};
 
   using NodeType = rclcpp::node_interfaces::NodeInterfaces<
     rclcpp::node_interfaces::NodeBaseInterface,
@@ -89,6 +91,7 @@ private:
 
   rclcpp::executors::SingleThreadedExecutor executor_;
   rclcpp::Logger logger_;
+  std::chrono::milliseconds maximum_wait_time_{default_service_timeout};
 
   // Maps [service name][resource path] => pair(etag, resource).
   std::unordered_map<

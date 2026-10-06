@@ -14,15 +14,16 @@
 
 #include "resource_retriever_service_plugin/resource_retriever_service_plugin.hpp"
 
+#include <charconv>
 #include <chrono>
 #include <cinttypes>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <unordered_map>
 #include <utility>
 
@@ -65,6 +66,29 @@ RosServiceResourceRetriever::RosServiceResourceRetriever(
   executor_.add_callback_group(
     callback_group_,
     ros_node_.get<rclcpp::node_interfaces::NodeBaseInterface>());
+
+  const std::string timeout_env = rcpputils::get_env_var(service_timeout_env_var.data());
+  if (!timeout_env.empty()) {
+    constexpr int64_t max_timeout_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::nanoseconds::max()).count();
+    int64_t timeout_ms = 0;
+    const char * begin = timeout_env.data();
+    const char * end = begin + timeout_env.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, timeout_ms);
+    if (ec == std::errc{} && ptr == end && timeout_ms > 0 && timeout_ms <= max_timeout_ms) {
+      maximum_wait_time_ = std::chrono::milliseconds(timeout_ms);
+    } else {
+      RCLCPP_WARN(
+        this->logger_,
+        "Invalid %s value '%s' (expected positive integer milliseconds <= %" PRId64
+        "), using default %" PRId64 " ms.",
+        service_timeout_env_var.data(),
+        timeout_env.c_str(),
+        max_timeout_ms,
+        static_cast<int64_t>(maximum_wait_time_.count()));
+    }
+  }
 }
 
 std::string RosServiceResourceRetriever::name()
@@ -155,26 +179,7 @@ RosServiceResourceRetriever::get_shared(const std::string & url)
   req->etag = etag;
   auto result = client->async_send_request(req);
 
-  using namespace std::chrono_literals;
-  std::chrono::milliseconds maximum_wait_time = 30s;
-  const std::string timeout_env = rcpputils::get_env_var(service_timeout_env_var.data());
-  if (!timeout_env.empty()) {
-    char * end = nullptr;
-    const int64_t timeout_ms = std::strtoll(timeout_env.c_str(), &end, 10);
-    if (end != timeout_env.c_str() && *end == '\0' && timeout_ms > 0) {
-      maximum_wait_time = std::chrono::milliseconds(timeout_ms);
-    } else {
-      RCLCPP_WARN(
-        this->logger_,
-        "Invalid %s value '%s' (expected positive integer milliseconds), using default %" PRId64
-        " ms.",
-        service_timeout_env_var.data(),
-        timeout_env.c_str(),
-        static_cast<int64_t>(maximum_wait_time.count()));
-    }
-  }
-
-  if (executor_.spin_until_future_complete(result, maximum_wait_time) !=
+  if (executor_.spin_until_future_complete(result, maximum_wait_time_) !=
     rclcpp::FutureReturnCode::SUCCESS)
   {
     RCLCPP_ERROR(this->logger_, "Timeout: Not able to call the service %s", service_name.data());

@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -91,6 +92,8 @@ class RosServiceResourceRetrieverTest : public ::testing::Test
 protected:
   void SetUp() override
   {
+    rcpputils::set_env_var(RosServiceResourceRetriever::service_timeout_env_var.data(), nullptr);
+
     executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
 
     client_node_ = rclcpp::Node::make_shared("test_client_node");
@@ -281,6 +284,7 @@ TEST_F(RosServiceResourceRetrieverTest, ServiceTimeoutViaEnvVarReturnsNull)
 {
   ASSERT_TRUE(
     rcpputils::set_env_var(RosServiceResourceRetriever::service_timeout_env_var.data(), "50"));
+  retriever_ = std::make_unique<RosServiceResourceRetriever>(*client_node_);
 
   GetResource::Response response;
   response.status_code = GetResource::Response::OK;
@@ -297,22 +301,66 @@ TEST_F(RosServiceResourceRetrieverTest, ServiceTimeoutViaEnvVarReturnsNull)
   EXPECT_EQ(resource, nullptr);
 }
 
-TEST_F(RosServiceResourceRetrieverTest, InvalidServiceTimeoutEnvVarFallsBackToDefault)
+TEST_F(RosServiceResourceRetrieverTest, ValidServiceTimeoutEnvVarSucceeds)
 {
   ASSERT_TRUE(
-    rcpputils::set_env_var(
-      RosServiceResourceRetriever::service_timeout_env_var.data(), "invalid_timeout"));
+    rcpputils::set_env_var(RosServiceResourceRetriever::service_timeout_env_var.data(), "1000"));
+  retriever_ = std::make_unique<RosServiceResourceRetriever>(*client_node_);
 
   std::vector<uint8_t> resource_data(2u, 3);
   GetResource::Response response;
   response.status_code = GetResource::Response::OK;
   response.body = resource_data;
 
-  EXPECT_CALL(mock_service_function_, Call(_, _)).WillOnce(Return(response));
+  EXPECT_CALL(mock_service_function_, Call(_, _)).WillOnce(
+    Invoke(
+      [response](const std::string &, const std::string &) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        return response;
+      }));
 
   auto resource = retriever_->get_shared("service://test_service:a");
   ASSERT_NE(nullptr, resource);
   EXPECT_EQ(resource->data, resource_data);
+}
+
+TEST_F(RosServiceResourceRetrieverTest, InvalidServiceTimeoutEnvVarFallsBackToDefault)
+{
+  const std::vector<std::string> invalid_values = {
+    "invalid_timeout",
+    "0",
+    "-50",
+    "10abc",
+    "999999999999999999999999999999",
+    std::to_string(std::numeric_limits<int64_t>::max()),
+  };
+
+  std::vector<uint8_t> resource_data(2u, 3);
+  GetResource::Response response;
+  response.status_code = GetResource::Response::OK;
+  response.body = resource_data;
+
+  for (const auto & invalid_value : invalid_values) {
+    SCOPED_TRACE("Testing invalid env var value: " + invalid_value);
+    ASSERT_TRUE(
+      rcpputils::set_env_var(
+        RosServiceResourceRetriever::service_timeout_env_var.data(), invalid_value.c_str()));
+    retriever_ = std::make_unique<RosServiceResourceRetriever>(*client_node_);
+
+    // Sleep 100ms in the service callback so that if a short prefix like "10abc" (10ms),
+    // "0", "-50", or an overflowed negative duration were used instead of falling back
+    // to the 3000ms default, the call would time out and fail.
+    EXPECT_CALL(mock_service_function_, Call(_, _)).WillOnce(
+      Invoke(
+        [response](const std::string &, const std::string &) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          return response;
+        }));
+
+    auto resource = retriever_->get_shared("service://test_service:a");
+    ASSERT_NE(nullptr, resource);
+    EXPECT_EQ(resource->data, resource_data);
+  }
 }
 
 }  // namespace
